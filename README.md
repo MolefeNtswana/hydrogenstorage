@@ -1,5 +1,6 @@
 # hydrogenstorage
 hydrogen-storage
+
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import odeint
@@ -13,9 +14,11 @@ c_p = 4.18  # Specific heat capacity, J/(g K)
 m_hydride = 1000  # Mass of the hydride in grams
 V = 0.01  # Volume of the tank in m^3
 delta_H = -75000  # Enthalpy change in J/mol
+delta_S = -130  # Entropy change in J/(mol K)
 T_ref = 298  # Reference temperature in K
 activation_energy = 50000  # Activation energy in J/mol
-rate_constant = 0.001  # Rate constant
+rate_constant_a = 0.001  # Rate constant for absorption
+rate_constant_d = 0.001  # Rate constant for desorption
 k_eff = 0.5  # Effective thermal conductivity in W/(m K)
 
 # Metal hydride properties
@@ -37,26 +40,21 @@ time = np.arange(0, t_final, dt)
 # Initial conditions
 initial_temperature = T_amb
 initial_pressure = P_amb
-initial_mass = 0
 initial_fraction = 0  # Initial fraction of hydrogen absorbed
 
-# Define the probe positions (for simplicity, we'll use a grid)
-n_probes = 10
-probe_positions = np.linspace(0, tank_height, n_probes)
-
 # Initialize arrays to store results
-temperatures = np.full((n_probes, len(time)), initial_temperature)
-pressures = np.full((n_probes, len(time)), initial_pressure)
-equilibrium_pressures = np.full((n_probes, len(time)), initial_pressure)
-velocities_darcy = np.zeros((n_probes, len(time)))
-velocities_turbulent = np.zeros((n_probes, len(time)))
-velocities_laminar = np.zeros((n_probes, len(time)))
-velocities_transition = np.zeros((n_probes, len(time)))
+temperatures = np.full(len(time), initial_temperature)
+pressures = np.full(len(time), initial_pressure)
+equilibrium_pressures = np.full(len(time), initial_pressure)
+velocities_darcy = np.zeros(len(time))
+velocities_turbulent = np.zeros(len(time))
+velocities_laminar = np.zeros(len(time))
+velocities_transition = np.zeros(len(time))
 mass_stored_darcy = np.zeros(len(time))
 mass_stored_turbulent = np.zeros(len(time))
 mass_stored_laminar = np.zeros(len(time))
 mass_stored_transition = np.zeros(len(time))
-fractions = np.full((n_probes, len(time)), initial_fraction)
+fractions = np.full(len(time), initial_fraction)
 
 # Define functions for flow regimes
 def darcy_flow(K, dP, mu, L):
@@ -78,53 +76,52 @@ def transition_flow(dP, rho, mu, L, r):
         return (laminar_flow(mu, dP, L, r) + turbulent_flow(dP, rho, L)) / 2
 
 # Define the hydrogen absorption kinetics function
-def hydrogen_absorption(X, t, T):
-    return rate_constant * (1 - X) * np.exp(-activation_energy / (R * T))
+def hydrogen_absorption(X, t, T, P, P_eq):
+    r_a = rate_constant_a * (P - P_eq) * (1 - X)
+    r_d = rate_constant_d * (P_eq - P) * X
+    return r_a - r_d
 
 # Simulation loop
 for t in range(1, len(time)):
-    for i in range(n_probes):
-        # Calculate the pressure gradient (simplified)
-        if i == 0:
-            dP = pressures[i, t-1] - pressures[i+1, t-1]
-        elif i == n_probes - 1:
-            dP = pressures[i-1, t-1] - pressures[i, t-1]
-        else:
-            dP = (pressures[i-1, t-1] - pressures[i+1, t-1]) / 2
+    # Calculate the pressure gradient (simplified)
+    dP = pressures[t-1] - P_amb
 
-        # Calculate velocities based on flow regimes
-        velocities_darcy[i, t] = darcy_flow(K, dP, mu, tank_height/n_probes)
-        velocities_turbulent[i, t] = turbulent_flow(dP, rho, tank_height/n_probes)
-        velocities_laminar[i, t] = laminar_flow(mu, dP, tank_height/n_probes, tank_radius)
-        velocities_transition[i, t] = transition_flow(dP, rho, mu, tank_height/n_probes, tank_radius)
+    # Calculate velocities based on flow regimes
+    velocities_darcy[t] = darcy_flow(K, dP, mu, tank_height)
+    velocities_turbulent[t] = turbulent_flow(dP, rho, tank_height)
+    velocities_laminar[t] = laminar_flow(mu, dP, tank_height, tank_radius)
+    velocities_transition[t] = transition_flow(dP, rho, mu, tank_height, tank_radius)
 
-        # Update temperature (considering heat transfer in porous media)
-        Q = delta_H * fractions[i, t-1]
-        T_prev = temperatures[i, t-1]
-        convective_term = velocities_darcy[i, t] * (T_amb - T_prev)
-        conductive_term = k_eff * (T_amb - T_prev) / (tank_height/n_probes)
-        temperatures[i, t] = T_prev + dt * (Q / (m_hydride * c_p) + convective_term + conductive_term)
+    # Update temperature (considering heat transfer in porous media)
+    Q = delta_H * fractions[t-1]
+    T_prev = temperatures[t-1]
+    convective_term = velocities_darcy[t] * (T_amb - T_prev)
+    conductive_term = k_eff * (T_amb - T_prev) / tank_height
+    temperatures[t] = T_prev + dt * (Q / (m_hydride * c_p) + convective_term + conductive_term)
 
-        # Update hydrogen fraction absorbed using ODE solver
-        fractions[i, t] = odeint(hydrogen_absorption, fractions[i, t-1], [0, dt], args=(temperatures[i, t],))[-1]
+    # Calculate equilibrium pressure using Van't Hoff equation
+    equilibrium_pressures[t] = np.exp(delta_H / R * (1 / T_ref - 1 / temperatures[t])) * np.exp(delta_S / R)
 
-        # Update pressure using the ideal gas law
-        pressures[i, t] = P_amb * (1 - fractions[i, t])
+    # Update hydrogen fraction absorbed using ODE solver
+    fractions[t] = odeint(hydrogen_absorption, fractions[t-1], [0, dt], args=(temperatures[t], pressures[t-1], equilibrium_pressures[t]))[-1]
 
-        # Calculate equilibrium pressure using Van't Hoff equation
-        equilibrium_pressures[i, t] = np.exp(delta_H / R * (1 / T_ref - 1 / temperatures[i, t]))
+    # Update pressure using the ideal gas law
+    pressures[t] = P_amb * (1 - fractions[t])
 
-    # Calculate mass stored
-    mass_stored_darcy[t] = capacity * (tank_volume - np.sum(velocities_darcy[:, t] * dt))
-    mass_stored_turbulent[t] = capacity * (tank_volume - np.sum(velocities_turbulent[:, t] * dt))
-    mass_stored_laminar[t] = capacity * (tank_volume - np.sum(velocities_laminar[:, t] * dt))
-    mass_stored_transition[t] = capacity * (tank_volume - np.sum(velocities_transition[:, t] * dt))
+    # Calculate mass stored considering the mass source term
+    r_a = rate_constant_a * (pressures[t-1] - equilibrium_pressures[t]) * (1 - fractions[t-1])
+    r_d = rate_constant_d * (equilibrium_pressures[t] - pressures[t-1]) * fractions[t-1]
+    mass_source = r_a - r_d
+    mass_stored_darcy[t] = mass_stored_darcy[t-1] + mass_source * dt
+    mass_stored_turbulent[t] = mass_stored_turbulent[t-1] + mass_source * dt
+    mass_stored_laminar[t] = mass_stored_laminar[t-1] + mass_source * dt
+    mass_stored_transition[t] = mass_stored_transition[t-1] + mass_source * dt
 
 # Plot results
 plt.figure(figsize=(12, 10))
 
 # Plot mass stored comparison
-plt.subplot(5, 1, 1)
+plt.subplot(4, 1, 1)
 plt.plot(time, mass_stored_darcy, label='Darcy Flow')
 plt.plot(time, mass_stored_turbulent, label='Turbulent Flow')
 plt.plot(time, mass_stored_laminar, label='Laminar Flow')
@@ -134,42 +131,28 @@ plt.ylabel('Mass Stored (mol)')
 plt.title('Hydrogen Mass Stored over Time')
 plt.legend()
 
-# Plot temperature at different probe positions for one regime (Darcy Flow)
-plt.subplot(5, 1, 2)
-for i in range(n_probes):
-    plt.plot(time, temperatures[i, :], label=f'Probe {i+1}')
+# Plot temperature evolution
+plt.subplot(4, 1, 2)
+plt.plot(time, temperatures, label='Temperature')
 plt.xlabel('Time (s)')
 plt.ylabel('Temperature (K)')
-plt.title('Temperature at Different Probe Positions')
+plt.title('Temperature Evolution over Time')
 plt.legend()
 
-# Plot pressure at different probe positions for one regime (Darcy Flow)
-plt.subplot(5, 1, 3)
-for i in range(n_probes):
-    plt.plot(time, pressures[i, :], label=f'Probe {i+1}')
+# Plot pressure evolution
+plt.subplot(4, 1, 3)
+plt.plot(time, pressures, label='Pressure')
 plt.xlabel('Time (s)')
 plt.ylabel('Pressure (Pa)')
-plt.title('Pressure at Different Probe Positions')
+plt.title('Pressure Evolution over Time')
 plt.legend()
 
-# Plot equilibrium pressure at different probe positions for one regime (Darcy Flow)
-plt.subplot(5, 1, 4)
-for i in range(n_probes):
-    plt.plot(time, equilibrium_pressures[i, :], label=f'Probe {i+1}')
+# Plot equilibrium pressure evolution
+plt.subplot(4, 1, 4)
+plt.plot(time, equilibrium_pressures, label='Equilibrium Pressure')
 plt.xlabel('Time (s)')
 plt.ylabel('Equilibrium Pressure (Pa)')
-plt.title('Equilibrium Pressure at Different Probe Positions')
-plt.legend()
-
-# Plot velocities for different flow regimes at the first probe position
-plt.subplot(5, 1, 5)
-plt.plot(time, velocities_darcy[0, :], label='Darcy Flow')
-plt.plot(time, velocities_turbulent[0, :], label='Turbulent Flow')
-plt.plot(time, velocities_laminar[0, :], label='Laminar Flow')
-plt.plot(time, velocities_transition[0, :], label='Transition Flow')
-plt.xlabel('Time (s)')
-plt.ylabel('Velocity (m/s)')
-plt.title('Velocities at Probe 1 for Different Flow Regimes')
+plt.title('Equilibrium Pressure Evolution over Time')
 plt.legend()
 
 plt.tight_layout()
